@@ -15,12 +15,12 @@ import requests
 app = FastAPI(
     title="API Defensores Estratégico Penal",
     description="Servicio backend para consulta procesal y análisis penal estratégico con IA.",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ACCESS_KEY = os.getenv("DEFENSA_API_KEY", "")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _lock = threading.Lock()
 _calls = deque()
@@ -85,7 +85,7 @@ def read_root():
     return {
         "sistema": "Defensores Estratégico Penal API",
         "estado": "Operativo",
-        "version": "1.1.0"
+        "version": "1.2.0"
     }
 
 @app.post("/consultar-rama", response_model=ConsultaRamaResponse, tags=["Consulta Judicial"])
@@ -219,3 +219,66 @@ def analizar_actuacion(payload: AnalisisActuacionRequest, access=Depends(require
     except (ValueError, KeyError, TypeError):
         raise HTTPException(502, "Respuesta de IA incompleta o inválida. No se sustituye por un análisis ficticio.")
     return RespuestaIA(**result.model_dump(), modelo=MODEL)
+
+
+# Separate contract for locally selected passages, never fabricated citations.
+import draft_contract
+from pydantic import ConfigDict
+class PaqueteBorrador(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    context: str = Field(min_length=1, max_length=4000)
+    sources: List[dict] = Field(min_length=1, max_length=20)
+    fingerprint: str = Field(min_length=64, max_length=64)
+    model: str = Field(min_length=1, max_length=100)
+    confirmed_fictitious: bool
+    confirmed_external: bool
+
+def gemini_schema(value):
+    if isinstance(value, list): return [gemini_schema(x) for x in value]
+    if not isinstance(value, dict): return value
+    return {k: (v.upper() if k == "type" else gemini_schema(v))
+            for k, v in value.items() if k != "additionalProperties"}
+
+@app.post("/generar-borrador", tags=["Inteligencia Artificial"])
+def generar_borrador(payload: PaqueteBorrador, access=Depends(require_access)):
+    if not payload.confirmed_fictitious or not payload.confirmed_external:
+        raise HTTPException(422, "Declara material ficticio y autorización externa.")
+    if payload.model != MODEL:
+        raise HTTPException(409, "Modelo remoto distinto; actualiza la sesión local.")
+    try:
+        packet = draft_contract.prepare(payload.context, payload.sources)
+        if packet["fingerprint"] != payload.fingerprint:
+            raise draft_contract.AIError("Paquete alterado")
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(422, "Paquete de referencias inválido o alterado.")
+    if not GEMINI_API_KEY or not re.fullmatch(r"gemini-[a-zA-Z0-9.\-]+", MODEL):
+        raise HTTPException(503, "Configuración Gemini incompleta.")
+    reserve_ai_call()
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
+            headers={"x-goog-api-key": GEMINI_API_KEY},
+            json={"systemInstruction": {"parts": [{"text": draft_contract.PROMPT +
+                " Piloto exclusivamente ficticio. Responde en español. Usa el esquema solicitado. "
+                "Cada afirmación debe citar literalmente una fuente recibida mediante ref y quote. "
+                "No afirmes verificación jurídica ni actualidad jurisprudencial."}]},
+                "contents": [{"role": "user", "parts": [{"text": json.dumps(packet, ensure_ascii=False)}]}],
+                "generationConfig": {"responseMimeType": "application/json",
+                    "responseSchema": gemini_schema(draft_contract.schema()), "temperature": 0.2,
+                    "maxOutputTokens": 5000}}, timeout=(10,45), allow_redirects=False)
+    except requests.Timeout:
+        raise HTTPException(504, "Tiempo de espera agotado; sin reintento automático.")
+    except requests.RequestException:
+        raise HTTPException(502, "No se pudo conectar con Gemini.")
+    if response.status_code == 429: raise HTTPException(429, "Cuota Google agotada; sin cambio automático a pago.")
+    if response.status_code in (401,403,404): raise HTTPException(503, "Revisa clave o modelo Gemini en Render.")
+    if response.status_code != 200: raise HTTPException(502, "Google rechazó el borrador.")
+    try:
+        candidates=response.json().get("candidates", [])
+        if len(candidates)!=1 or candidates[0].get("finishReason")!="STOP": raise ValueError()
+        text="".join(p.get("text", "") for p in candidates[0]["content"]["parts"] if not p.get("thought"))
+        if len(text)>100000: raise ValueError()
+        out=draft_contract.validate(json.loads(text), packet)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(502, "Borrador incompleto o citas inválidas; resultado descartado.")
+    return dict(out, model=MODEL, origin="gemini_render_piloto_ficticio", fuentes_verificadas=False)
