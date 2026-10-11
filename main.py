@@ -3,6 +3,7 @@ import json
 import hmac
 import time
 import threading
+import logging
 from collections import deque
 from fastapi import Depends
 from fastapi.security import APIKeyHeader
@@ -15,7 +16,7 @@ import requests
 app = FastAPI(
     title="API Defensores Estratégico Penal",
     description="Servicio backend para consulta procesal y análisis penal estratégico con IA.",
-    version="1.2.0"
+    version="1.2.1"
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -254,6 +255,10 @@ def generar_borrador(payload: PaqueteBorrador, access=Depends(require_access)):
     if not GEMINI_API_KEY or not re.fullmatch(r"gemini-[a-zA-Z0-9.\-]+", MODEL):
         raise HTTPException(503, "Configuración Gemini incompleta.")
     reserve_ai_call()
+    def fail(code, reason, message):
+        # Only fixed categories: never provider bodies, prompts, keys or exceptions.
+        logging.getLogger("uvicorn.error").warning("DEFENSOR_IA_DIAG reason=%s http=%s", reason, code)
+        raise HTTPException(code, message)
     try:
         response = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
@@ -267,18 +272,32 @@ def generar_borrador(payload: PaqueteBorrador, access=Depends(require_access)):
                     "responseSchema": gemini_schema(draft_contract.schema()), "temperature": 0.2,
                     "maxOutputTokens": 5000}}, timeout=(10,45), allow_redirects=False)
     except requests.Timeout:
-        raise HTTPException(504, "Tiempo de espera agotado; sin reintento automático.")
+        fail(504, "upstream_timeout", "Tiempo de espera agotado; sin reintento automático.")
     except requests.RequestException:
-        raise HTTPException(502, "No se pudo conectar con Gemini.")
-    if response.status_code == 429: raise HTTPException(429, "Cuota Google agotada; sin cambio automático a pago.")
-    if response.status_code in (401,403,404): raise HTTPException(503, "Revisa clave o modelo Gemini en Render.")
-    if response.status_code != 200: raise HTTPException(502, "Google rechazó el borrador.")
+        fail(502, "upstream_connection", "No se pudo conectar con Gemini.")
+    if response.status_code == 429: fail(429, "upstream_quota", "Cuota Google agotada; sin cambio automático a pago.")
+    if response.status_code in (401,403,404): fail(503, "upstream_access_or_model", "Revisa clave o modelo Gemini en Render.")
+    if response.status_code != 200:
+        logging.getLogger("uvicorn.error").warning("DEFENSOR_IA_DIAG upstream_http=%d", response.status_code)
+        fail(502, "upstream_rejected", "Google rechazó el borrador.")
+    reason = "response_json_or_structure"
     try:
         candidates=response.json().get("candidates", [])
-        if len(candidates)!=1 or candidates[0].get("finishReason")!="STOP": raise ValueError()
+        reason = "candidate_count"
+        if len(candidates)!=1: raise ValueError()
+        reason = "generation_not_finished"
+        if candidates[0].get("finishReason")!="STOP":
+            finish = candidates[0].get("finishReason")
+            safe_finish = finish if finish in ("MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "MALFORMED_FUNCTION_CALL") else "UNKNOWN"
+            logging.getLogger("uvicorn.error").warning("DEFENSOR_IA_DIAG finish=%s", safe_finish)
+            raise ValueError()
+        reason = "response_structure"
         text="".join(p.get("text", "") for p in candidates[0]["content"]["parts"] if not p.get("thought"))
         if len(text)>100000: raise ValueError()
-        out=draft_contract.validate(json.loads(text), packet)
+        reason = "output_json"
+        parsed = json.loads(text)
+        reason = "contract_or_citations"
+        out=draft_contract.validate(parsed, packet)
     except (ValueError, TypeError, KeyError, AttributeError):
-        raise HTTPException(502, "Borrador incompleto o citas inválidas; resultado descartado.")
+        fail(502, reason, "Borrador incompleto o citas inválidas; resultado descartado.")
     return dict(out, model=MODEL, origin="gemini_render_piloto_ficticio", fuentes_verificadas=False)
