@@ -16,7 +16,7 @@ import requests
 app = FastAPI(
     title="API Defensores Estratégico Penal",
     description="Servicio backend para consulta procesal y análisis penal estratégico con IA.",
-    version="1.2.1"
+    version="1.2.2"
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -277,6 +277,8 @@ def generar_borrador(payload: PaqueteBorrador, access=Depends(require_access)):
         fail(502, "upstream_connection", "No se pudo conectar con Gemini.")
     if response.status_code == 429: fail(429, "upstream_quota", "Cuota Google agotada; sin cambio automático a pago.")
     if response.status_code in (401,403,404): fail(503, "upstream_access_or_model", "Revisa clave o modelo Gemini en Render.")
+    if response.status_code == 503:
+        fail(503, "upstream_unavailable", "Gemini temporalmente no disponible; sin reintento automático.")
     if response.status_code != 200:
         logging.getLogger("uvicorn.error").warning("DEFENSOR_IA_DIAG upstream_http=%d", response.status_code)
         fail(502, "upstream_rejected", "Google rechazó el borrador.")
