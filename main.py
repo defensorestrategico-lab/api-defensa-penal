@@ -16,7 +16,7 @@ import requests
 app = FastAPI(
     title="API Defensores Estratégico Penal",
     description="Servicio backend para consulta procesal y análisis penal estratégico con IA.",
-    version="1.3.0"
+    version="1.4.0"
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -86,7 +86,7 @@ def read_root():
     return {
         "sistema": "Defensores Estratégico Penal API",
         "estado": "Operativo",
-        "version": "1.3.0"
+        "version": "1.4.0"
     }
 
 @app.post("/consultar-rama", response_model=ConsultaRamaResponse, tags=["Consulta Judicial"])
@@ -309,3 +309,7 @@ import news_service
 @app.get('/actualidad-penal', tags=['Actualidad informativa'])
 def actualidad_penal():
     return news_service.get(GEMINI_API_KEY, MODEL, reserve_ai_call)
+
+# Agente documental: contrato independiente; no cambia el piloto anterior.
+import defense_agent_api
+defense_agent_api.install(app,require_access,lambda:(GEMINI_API_KEY,MODEL),reserve_ai_call,gemini_schema)
