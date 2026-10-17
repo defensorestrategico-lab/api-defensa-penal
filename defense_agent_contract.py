@@ -65,7 +65,7 @@ def validate(result,packet):
  refs={s['ref']:s['text'] for s in packet['sources']}
  for item in result['findings']+result['cross_exam']+result.get('case_data',[])+result.get('legal_analysis',[]):
   cites=item.get('citations',item.get('support'))
-  if item not in result['cross_exam'] and not cites:raise ValueError('Hallazgo sin soporte.')
+  if not cites:raise ValueError('Hallazgo o contrainterrogatorio sin soporte documental.')
   for c in cites:
    if c['ref'] not in refs or c['quote'] not in refs[c['ref']]:raise ValueError('Cita ajena al material o inexistente.')
  for item in result.get('case_data',[]):

@@ -16,7 +16,7 @@ import requests
 app = FastAPI(
     title="API Defensores Estratégico Penal",
     description="Servicio backend para consulta procesal y análisis penal estratégico con IA.",
-    version="1.4.0"
+    version="1.4.1"
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -86,7 +86,7 @@ def read_root():
     return {
         "sistema": "Defensores Estratégico Penal API",
         "estado": "Operativo",
-        "version": "1.4.0"
+        "version": "1.4.1"
     }
 
 @app.post("/consultar-rama", response_model=ConsultaRamaResponse, tags=["Consulta Judicial"])
@@ -313,3 +313,22 @@ def actualidad_penal():
 # Agente documental: contrato independiente; no cambia el piloto anterior.
 import defense_agent_api
 defense_agent_api.install(app,require_access,lambda:(GEMINI_API_KEY,MODEL),reserve_ai_call,gemini_schema)
+
+# El complemento público se actualiza al iniciar y una vez por día de servicio,
+# sin depender de que el abogado abra una pantalla ni usar material privado.
+_news_stop = threading.Event()
+_news_thread = None
+@app.on_event("startup")
+def start_public_news():
+    global _news_thread
+    if os.environ.get('NEWS_ENABLED','1')!='1':return
+    _news_stop.clear()
+    def loop():
+        while not _news_stop.is_set():
+            try:news_service.ensure(GEMINI_API_KEY, MODEL, reserve_ai_call)
+            except Exception:logging.getLogger('uvicorn.error').warning('DEFENSOR_NEWS_DIAG scheduler_unavailable')
+            if _news_stop.wait(900):break
+    _news_thread=threading.Thread(target=loop,daemon=True);_news_thread.start()
+@app.on_event("shutdown")
+def stop_public_news():
+    _news_stop.set()
